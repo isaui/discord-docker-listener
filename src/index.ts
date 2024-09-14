@@ -172,17 +172,17 @@ docker.getEvents((err, stream) => {
     const event = JSON.parse(chunk.toString()) as DockerEvent;
     console.log('Received Docker event:', event);
 
-    sendDiscordLog(event);
+   // sendDiscordLog(event);
   });
 
   stream.on('error', (err: Error) => {
     console.error('Error in Docker event stream:', err);
-    logger.error('Docker Event Stream Error', err.message);
+   // logger.error('Docker Event Stream Error', err.message);
   });
 
   stream.on('end', () => {
     console.log('Docker event stream ended');
-    logger.info('Docker Event Stream', 'Event stream has ended');
+  //  logger.info('Docker Event Stream', 'Event stream has ended');
   });
 });
 
