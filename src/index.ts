@@ -4,6 +4,7 @@ import DiscordLogger from 'isaui-discord-logger';
 import os from 'os';
 import dotenv from 'dotenv';
 import fs from 'fs';
+import { exec } from 'child_process';
 
 dotenv.config();
 
@@ -11,6 +12,7 @@ const PORT = parseInt(process.env.PORT || '54321', 10);
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
 const NAME = process.env.NAME || 'Docker Event Monitor';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const fullNotif = process.env.FULL_NOTIFICATION == 'true';
 
 if (!DISCORD_WEBHOOK_URL) {
   console.error('DISCORD_WEBHOOK_URL is not set. Exiting...');
@@ -68,6 +70,50 @@ interface DockerEvent {
   timeNano: number;
 }
 
+async function getDockerSystemDf(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      exec('docker system df', (error, stdout, stderr) => {
+        if (error) {
+          console.error(`Error executing command: ${error.message}`);
+          return reject(error);
+        }
+        if (stderr) {
+          console.error(`Error in output: ${stderr}`);
+          return reject(stderr);
+        }
+        resolve(stdout);
+      });
+    });
+  }
+
+  async function parseDockerSystemDf(): Promise<{
+    images: string;
+    containers: string;
+    volumes: string;
+    cache: string;
+  }> {
+    try {
+      const dfOutput = await getDockerSystemDf();
+      
+      // Regex for capturing relevant data from output
+      const imageMatch = dfOutput.match(/Images\s+\d+\s+\d+\s+([\d.]+[A-Z]+)\s+([\d.]+[A-Z]+)/);
+      const containerMatch = dfOutput.match(/Containers\s+\d+\s+\d+\s+([\d.]+[A-Z]+)\s+([\d.]+[A-Z]+)/);
+      const volumeMatch = dfOutput.match(/Local Volumes\s+\d+\s+\d+\s+([\d.]+[A-Z]+)\s+([\d.]+[A-Z]+)/);
+      const cacheMatch = dfOutput.match(/Build Cache\s+\d+\s+\d+\s+([\d.]+[A-Z]+)\s+([\d.]+[A-Z]+)/);
+  
+      const images = imageMatch ? `Size: ${imageMatch[1]}, Reclaimable: ${imageMatch[2]}` : 'N/A';
+      const containers = containerMatch ? `Size: ${containerMatch[1]}, Reclaimable: ${containerMatch[2]}` : 'N/A';
+      const volumes = volumeMatch ? `Size: ${volumeMatch[1]}, Reclaimable: ${volumeMatch[2]}` : 'N/A';
+      const cache = cacheMatch ? `Size: ${cacheMatch[1]}, Reclaimable: ${cacheMatch[2]}` : 'N/A';
+  
+      return { images, containers, volumes, cache };
+    } catch (error) {
+      console.error('Error parsing Docker system df output:', error);
+      throw error;
+    }
+  }
+  
+
 async function sendDiscordLog(event: DockerEvent): Promise<void> {
   const title = `Docker Event: ${event.Type} ${event.Action}`;
   const description = `Event details for ${event.Actor.ID}`;
@@ -96,7 +142,7 @@ async function sendDiscordLog(event: DockerEvent): Promise<void> {
   }
 }
 
-async function getDockerInfo(): Promise<{ storage: string, runningContainers: number, unusedContainers: number }> {
+async function getDockerInfo(): Promise<{ storage: string, reclaimableStorage: string, runningContainers: number, unusedContainers: number }> {
     try {
       console.log('Fetching Docker info...');
       const info = await docker.info();
@@ -106,13 +152,18 @@ async function getDockerInfo(): Promise<{ storage: string, runningContainers: nu
       const containers = await docker.listContainers({ all: true });
       console.log('Containers listed successfully');
   
-      // Calculate storage usage
+      // Hitung penggunaan storage
       const totalMemory = info.MemTotal;
       const usedMemory = totalMemory - os.freemem();
       const storageUsage = `${(usedMemory / (1024 * 1024)).toFixed(2)}MB / ${(totalMemory / (1024 * 1024)).toFixed(2)}MB`;
+      
+      // Fetch reclaimable space using `docker system df` equivalent
+      const df = await docker.df();
+      const reclaimableStorage = df.LayersReclaimableSize;
   
       return {
         storage: storageUsage,
+        reclaimableStorage: formatBytes(reclaimableStorage),
         runningContainers: info.ContainersRunning,
         unusedContainers: info.ContainersStopped
       };
@@ -122,6 +173,7 @@ async function getDockerInfo(): Promise<{ storage: string, runningContainers: nu
     }
   }
   
+  
   function formatBytes(bytes: number): string {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -130,29 +182,30 @@ async function getDockerInfo(): Promise<{ storage: string, runningContainers: nu
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-async function sendHourlyReport(): Promise<void> {
-  try {
-    const { storage, runningContainers, unusedContainers } = await getDockerInfo();
-    const title = 'Docker Hourly Report';
-    const description = 'Current Docker system status';
-    const fields = [
-      { name: 'Storage Usage', value: storage, inline: false },
-      { name: 'Running Containers', value: runningContainers.toString(), inline: true },
-      { name: 'Unused Containers', value: unusedContainers.toString(), inline: true },
-    ];
-
-    await logger.info(title, description, fields);
-    console.log('Hourly report sent successfully');
-  } catch (error) {
-    console.error('Error sending hourly report:', error);
-    logger.error('Hourly Report Error', (error as Error).message);
+  async function sendHourlyReport(): Promise<void> {
+    try {
+      const { storage, runningContainers, unusedContainers } = await getDockerInfo();
+      const { images, containers, volumes, cache } = await parseDockerSystemDf();
+  
+      const title = 'Docker Hourly Report';
+      const description = 'Current Docker system status';
+      const fields = [
+        { name: 'Storage Usage', value: storage, inline: false },
+        { name: 'Running Containers', value: runningContainers.toString(), inline: true },
+        { name: 'Unused Containers', value: unusedContainers.toString(), inline: true },
+        { name: 'Images', value: images, inline: false },       // Images Reclaimable info
+        { name: 'Containers', value: containers, inline: false }, // Containers Reclaimable info
+        { name: 'Volumes', value: volumes, inline: false },     // Volumes Reclaimable info
+        { name: 'Build Cache', value: cache, inline: false }    // Build Cache Reclaimable info
+      ];
+  
+      await logger.info(title, description, fields);
+      console.log('Hourly report sent successfully');
+    } catch (error) {
+      console.error('Error sending hourly report:', error);
+      logger.error('Hourly Report Error', (error as Error).message);
+    }
   }
-}
-
-// Send initial report and set up hourly interval
-sendHourlyReport().then(() => {
-  setInterval(sendHourlyReport, 30 * 60 * 1000); // 1 hour in milliseconds
-});
 
 // Listen to Docker events
 docker.getEvents((err, stream) => {
@@ -171,22 +224,29 @@ docker.getEvents((err, stream) => {
   stream.on('data', (chunk: Buffer) => {
     const event = JSON.parse(chunk.toString()) as DockerEvent;
     console.log('Received Docker event:', event);
-
-   // sendDiscordLog(event);
+    if(fullNotif){
+        sendDiscordLog(event);
+    }
+   // 
   });
 
   stream.on('error', (err: Error) => {
     console.error('Error in Docker event stream:', err);
-   // logger.error('Docker Event Stream Error', err.message);
+    if(fullNotif){
+        logger.error('Docker Event Stream Error', err.message);
+    }
+   // 
   });
 
   stream.on('end', () => {
     console.log('Docker event stream ended');
-  //  logger.info('Docker Event Stream', 'Event stream has ended');
+    if(fullNotif){
+        logger.info('Docker Event Stream', 'Event stream has ended');
+    }
   });
 });
 
-// Basic health check endpoint
+
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', name: NAME, platform: os.platform() });
 });
@@ -201,7 +261,6 @@ async function testDockerConnection() {
     }
   }
   
-  // Test the connection before starting the server
   testDockerConnection()
     .then(() => {
       app.listen(PORT, () => {
