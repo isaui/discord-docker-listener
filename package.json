@@ -26,6 +26,7 @@
     "typescript": "^5.6.2"
   },
   "dependencies": {
+    "docker-daemon-listener": "file:",
     "dockerode": "^4.0.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
